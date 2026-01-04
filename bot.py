@@ -10,6 +10,18 @@ from typing import Dict, Any, List, Optional, Tuple
 from dotenv import load_dotenv
 from aiohttp import web
 
+import sys
+import fcntl
+
+LOCK_FILE = "/tmp/quote_bot.lock"
+
+lock_fd = open(LOCK_FILE, "w")
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("Another instance is already running. Exiting.")
+    sys.exit(0)
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery
