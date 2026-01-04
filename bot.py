@@ -400,3 +400,36 @@ async def main():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
+import os
+import asyncio
+from aiohttp import web
+
+# ... твои импорты aiogram и остальной код выше ...
+
+async def start_web_server():
+    app = web.Application()
+
+    async def health(request):
+        return web.Response(text="OK")
+
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+
+    print(f"✅ Web server started on 0.0.0.0:{port}")
+
+async def main():
+    # запускаем веб-сервер параллельно
+    await start_web_server()
+
+    # запускаем бота
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
