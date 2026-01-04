@@ -3,6 +3,7 @@ import json
 import base64
 import random
 import time
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, Tuple
 
@@ -12,27 +13,34 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from aiohttp import web
+
 from openai import OpenAI
 from quotes import QUOTES
 
-# ===== настройки лимитов =====
+# ===== лимиты =====
 DAILY_LIMIT = 20          # 20 генераций в день
 COOLDOWN_SEC = 3.0        # не чаще 1 генерации в 3 секунды
 
-# Надёжно грузим .env рядом с bot.py
+
+# ===== env =====
+# Локально .env прочитается, на Render обычно используются Environment Variables
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not BOT_TOKEN:
-    raise RuntimeError("Нет BOT_TOKEN в .env")
+    raise RuntimeError("Нет BOT_TOKEN (добавь в .env или в Render Environment Variables)")
 if not OPENAI_API_KEY:
-    raise RuntimeError("Нет OPENAI_API_KEY в .env")
+    raise RuntimeError("Нет OPENAI_API_KEY (добавь в .env или в Render Environment Variables)")
 
+
+# ===== aiogram / openai =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
+
 
 # user_state[user_id] = {
 #   "gender": "female|male|universal",
@@ -47,9 +55,10 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # }
 user_state: Dict[int, Dict[str, Any]] = {}
 
+
 def today_str() -> str:
-    # локальное время машины/сервера; для простоты ок
     return time.strftime("%Y-%m-%d", time.localtime())
+
 
 def st(uid: int) -> Dict[str, Any]:
     if uid not in user_state:
@@ -64,15 +73,19 @@ def st(uid: int) -> Dict[str, Any]:
             "quota_used": 0,
             "last_req_ts": 0.0,
         }
-    # сброс дневного лимита на новый день
+
+    # сброс дневного лимита
     if user_state[uid]["quota_day"] != today_str():
         user_state[uid]["quota_day"] = today_str()
         user_state[uid]["quota_used"] = 0
+
     return user_state[uid]
+
 
 def quota_left(uid: int) -> int:
     s = st(uid)
     return max(0, DAILY_LIMIT - int(s.get("quota_used", 0)))
+
 
 def can_request(uid: int) -> Tuple[bool, str]:
     s = st(uid)
@@ -85,10 +98,11 @@ def can_request(uid: int) -> Tuple[bool, str]:
         return False, f"⏳ Подожди {wait} сек и попробуй ещё раз."
 
     # дневной лимит
-    if s.get("quota_used", 0) >= DAILY_LIMIT:
+    if int(s.get("quota_used", 0)) >= DAILY_LIMIT:
         return False, "Лимит 20 генераций на сегодня исчерпан 😅\nПриходи завтра — лимит обновится."
 
     return True, ""
+
 
 def mark_request(uid: int) -> None:
     s = st(uid)
@@ -105,6 +119,7 @@ def gender_kb():
     kb.adjust(1)
     return kb.as_markup()
 
+
 def mode_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="🧼 Без мата", callback_data="mode:clean")
@@ -112,12 +127,14 @@ def mode_kb():
     kb.adjust(1)
     return kb.as_markup()
 
+
 def adult_confirm_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Мне 18+ (включить)", callback_data="adult:yes")
     kb.button(text="❌ Нет (без мата)", callback_data="adult:no")
     kb.adjust(1)
     return kb.as_markup()
+
 
 def actions_kb(uid: int):
     left = quota_left(uid)
@@ -183,13 +200,20 @@ def analyze_image(image_data_url: str) -> Dict[str, Any]:
     try:
         return json.loads(t)
     except json.JSONDecodeError:
-        return {"mood": "универсально", "scene": "фото", "colors": "нейтрально", "vibe_tags": ["aesthetic"], "safe": "yes"}
+        return {
+            "mood": "универсально",
+            "scene": "фото",
+            "colors": "нейтрально",
+            "vibe_tags": ["aesthetic"],
+            "safe": "yes",
+        }
+
 
 def generate_caption(analysis: Dict[str, Any], gender: str, length: str, mode: str) -> str:
     gender_style = {
         "female": "Женский стиль: эстетично, мягко, уверенно.",
         "male": "Мужской стиль: сдержанно, уверенно, можно чуть дерзко.",
-        "universal": "Универсально: подходит всем, красиво и естественно."
+        "universal": "Универсально: подходит всем, красиво и естественно.",
     }[gender]
 
     len_style = "Очень коротко (до 8 слов)." if length == "short" else "Средняя длина (1–2 строки)."
@@ -212,7 +236,7 @@ def generate_caption(analysis: Dict[str, Any], gender: str, length: str, mode: s
         "- без эмодзи\n"
         "- без кавычек\n"
         "- без хэштегов\n\n"
-        f"Контекст:\n"
+        "Контекст:\n"
         f"mood: {analysis.get('mood')}\n"
         f"scene: {analysis.get('scene')}\n"
         f"colors: {analysis.get('colors')}\n"
@@ -235,8 +259,9 @@ async def start(message: Message):
     await message.answer(
         "Привет! Я делаю подписи под фото.\n\n"
         "Шаг 1: выбери стиль:",
-        reply_markup=gender_kb()
+        reply_markup=gender_kb(),
     )
+
 
 @dp.callback_query(F.data.startswith("gender:"))
 async def on_gender(c: CallbackQuery):
@@ -244,6 +269,7 @@ async def on_gender(c: CallbackQuery):
     st(uid)["gender"] = c.data.split(":", 1)[1]
     await c.answer("Ок")
     await c.message.answer("Шаг 2: выбери режим:", reply_markup=mode_kb())
+
 
 @dp.callback_query(F.data.startswith("mode:"))
 async def on_mode(c: CallbackQuery):
@@ -257,6 +283,7 @@ async def on_mode(c: CallbackQuery):
     else:
         await c.answer()
         await c.message.answer("18+ подтверждаешь?", reply_markup=adult_confirm_kb())
+
 
 @dp.callback_query(F.data.startswith("adult:"))
 async def on_adult_confirm(c: CallbackQuery):
@@ -272,6 +299,7 @@ async def on_adult_confirm(c: CallbackQuery):
         st(uid)["adult_ok"] = False
         await c.answer("Без мата")
         await c.message.answer("Ок. Отправь фото 📸")
+
 
 @dp.callback_query(F.data.startswith("len:"))
 async def on_len(c: CallbackQuery):
@@ -299,15 +327,18 @@ async def on_len(c: CallbackQuery):
 
         await c.message.answer(cap, reply_markup=actions_kb(uid))
 
+
 @dp.callback_query(F.data == "nav:gender")
 async def nav_gender(c: CallbackQuery):
     await c.answer()
     await c.message.answer("Выбери стиль:", reply_markup=gender_kb())
 
+
 @dp.callback_query(F.data == "nav:mode")
 async def nav_mode(c: CallbackQuery):
     await c.answer()
     await c.message.answer("Выбери режим:", reply_markup=mode_kb())
+
 
 @dp.message(F.photo)
 async def on_photo(m: Message):
@@ -359,6 +390,7 @@ async def on_photo(m: Message):
             pass
         await m.answer(pick_fallback(uid), reply_markup=actions_kb(uid))
 
+
 @dp.callback_query(F.data == "gen:next")
 async def gen_next(c: CallbackQuery):
     uid = c.from_user.id
@@ -389,23 +421,13 @@ async def gen_next(c: CallbackQuery):
 
     await c.message.answer(cap, reply_markup=actions_kb(uid))
 
+
 @dp.message()
 async def other(m: Message):
     await m.answer("Отправь фото 📸 или нажми /start")
 
 
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
-import os
-import asyncio
-from aiohttp import web
-
-# ... твои импорты aiogram и остальной код выше ...
-
+# ===== web server for Render =====
 async def start_web_server():
     app = web.Application()
 
@@ -424,12 +446,11 @@ async def start_web_server():
 
     print(f"✅ Web server started on 0.0.0.0:{port}")
 
-async def main():
-    # запускаем веб-сервер параллельно
-    await start_web_server()
 
-    # запускаем бота
+async def main():
+    await start_web_server()
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
