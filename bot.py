@@ -1,29 +1,34 @@
 import os
 import asyncio
-from aiohttp import web
+from pathlib import Path
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher
-from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiohttp import web
 
-load_dotenv()
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
+from aiogram.filters import CommandStart
+
+# ================= ENV =================
+load_dotenv(Path(__file__).with_name(".env"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set")
 
-bot = Bot(BOT_TOKEN)
+# ================= AIROGRAM =================
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(CommandStart())
-async def start(msg: Message):
-    await msg.answer("Бот работает 🚀")
+async def start(m: Message):
+    await m.answer("Бот работает 🔥 Отправь фото или текст.")
 
-# -----------------------------
-# WEB SERVER FOR RENDER
-# -----------------------------
-async def start_web():
+@dp.message()
+async def echo(m: Message):
+    await m.answer("Я жив. Бот работает.")
+
+# ================= WEB SERVER =================
+async def start_web_server():
     app = web.Application()
 
     async def health(request):
@@ -39,15 +44,12 @@ async def start_web():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    print(f"🌐 Web server running on {port}")
+    print(f"🌐 Web server running on 0.0.0.0:{port}")
 
-# -----------------------------
-# MAIN
-# -----------------------------
+# ================= MAIN =================
 async def main():
-    await start_web()
-    print("🤖 Bot polling started")
-    await dp.start_polling(bot)
+    await start_web_server()        # запускаем Render порт
+    await dp.start_polling(bot)     # запускаем Telegram
 
 if __name__ == "__main__":
     asyncio.run(main())
